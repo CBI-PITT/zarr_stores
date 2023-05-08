@@ -10,7 +10,7 @@ A Zarr store that uses HDF5 as a containiner to shard chunks accross a single
 axis.  The store is implemented similar to a directory store 
 but on axis[-3] HDF5 files are written which contain
 chunks cooresponding to the remainining axes.  If the shape of the 
-the array are less than 3 axdes, the shards will be accross axis0
+the array is less than 3 axes, the shards will be accross axis0
 
 Example:
     array.shape = (1,1,200,10000,10000)
@@ -20,9 +20,9 @@ Example:
     
     4.hf contents:
         key:value
-        0.0:bit-string
-        0.1:bit-string
-        4.6:bit-string
+        0.0:byte-string
+        0.1:byte-string
+        4.6:byte-string
         ...
         ...
 '''
@@ -35,13 +35,9 @@ import h5py
 import shutil
 import time
 import numpy as np
-import random
 import uuid
 import glob
-import threading
-import datetime
 import re
-import h5py
 
 from zarr.errors import (
     MetadataError,
@@ -87,8 +83,36 @@ class H5_Nested_Store(Store):
         (e.g. 'foo' and 'FOO' will be treated as equivalent). This can be
         useful to avoid potential discrepancies between case-sensitive and
         case-insensitive file system. Default value is False.
-    dimension_separator : {'.', '/'}, optional
+    dimension_separator : {None,'/'}
         Separator placed between the dimensions of a chunk.
+        '/' is the only valid separator. If None, '/' will default to '/' 
+        If any thing other an '/' or None then an error will be raised
+    write_direct : bool
+        If True chunks will be written directly to hdf5 file.
+        If False store will behave like a NestedDirectoryStore, 
+        writing all chunks as individual files
+    swmr : bool
+        If True, swmr is used for writing h5 files
+    container_ext : {str, '.' + str} NOT ''
+        An extension is required for h5 files. This can be any string, but
+        by default it is 'h5'
+    distribuited_lock : bool
+        If True, the store will attempt use a local dask distribuited cluster
+        to coordinate distribuited locking when writing/reading file from 
+        h5 shards. If dask distribuited does is not installed, it will default
+        to hdf5 locking implemented by h5py. In single threaded operations, this
+        will not matter, but for parallel operations it may result in errors,
+        freezing and potentially data loss.
+        If write_direct is False, this will be forced to False
+    consolidate : bool
+        If True, the self.consoldate function will be called during __init__
+    consolidate_depth : int
+        Default 3: This determines the depth of sharding.on dimension according to 
+        array.shape[-consolidate_depth]
+    consolidate_parallel : bool
+        If True, a call to the self.consolidate function will be run in parallel
+        managed by dask
+        
     Examples
     --------
     Store a single array::
@@ -124,9 +148,10 @@ class H5_Nested_Store(Store):
     Safe to write in multiple threads or processes.
     """
 
-    def __init__(self, path, normalize_keys=False, dimension_separator=None, 
-                 consolidate=False, consolidate_depth=3, consolidate_parallel=True, swmr=True,
-                 container_ext='.h5', write_direct=True, distribuited_lock=True):
+    def __init__(self, path, normalize_keys=False, dimension_separator='/', 
+                 write_direct=True, swmr=True, container_ext='h5', distribuited_lock=True,
+                 consolidate=False, consolidate_depth=3, consolidate_parallel=True 
+                 ):
 
         # guard conditions
         path = os.path.abspath(path)
@@ -142,9 +167,24 @@ class H5_Nested_Store(Store):
                 "Archived_Nested_Store only supports '/' as dimension_separator")
         self._dimension_separator = dimension_separator
         self.swmr = swmr
-        self.container_ext = container_ext
+        if container_ext[0] == '.':
+            self.container_ext = container_ext
+        else:
+            self.container_ext = f'.{container_ext}'
 
         self._write_direct = write_direct
+        if distribuited_lock and self._write_direct:
+            try:
+                from distributed import Lock, get_client, Semaphore
+            except:
+                import warnings
+                warnings.warn("""Dask distribuited failed to import, check whether it is installed
+                              Thread and Process safe locking is disables, data 
+                              loss could occur in a parallel computing environment""")
+                distribuited_lock = False
+        else:
+            distribuited_lock = False
+                
         self.distribuited_lock = distribuited_lock
         self._setup_dist_lock()
 
@@ -157,7 +197,7 @@ class H5_Nested_Store(Store):
         self.uuid = uuid.uuid1()
 
     def _setup_dist_lock(self):
-        if self._write_direct and self.distribuited_lock:
+        if self.distribuited_lock and self._write_direct:
             from distributed import Lock, get_client, Semaphore
             '''Try to get client multiple times before erroring'''
             for _ in range(10):
@@ -174,12 +214,14 @@ class H5_Nested_Store(Store):
                         self.dist_client.close()
                     self.dist_client = None
                     self.distribuited = False
-                if self.dist_client is not None and self.distribuited:
+                if self.dist_client is not None \
+                    and self.dist_client.status == 'running' \
+                        and self.distribuited:
                     break
             if self.dist_client is None or not self.distribuited:
                 self.dist_client = None
                 self.distribuited = False
-                # raise NotImplementedError('Distribuited lock could not be setup')
+                raise NotImplementedError('Distribuited lock could not be setup')
         else:
             self.dist_client = None
             self.distribuited = False
@@ -229,13 +271,23 @@ class H5_Nested_Store(Store):
         """
         with open(fn, mode='wb') as f:
             f.write(a)
-
+    
     def _get_archive_key_name(self,path):
+        key = ''
+        for _ in range(self._consolidate_depth - 2):
+            path, last = os.path.split(path)
+            key = f'.{last}{key}'
         path, last = os.path.split(path)
-        path, first = os.path.split(path)
-        path, archive = os.path.split(path)
-        archive = '{}/{}'.format(path,archive + self.container_ext)
-        return archive, '{}.{}'.format(first,last)
+        key = f'{last}{key}'
+        
+        archive = f'{path}.{self.container_ext}'
+        return archive, key
+    
+    # def _get_archive_key_name(self,path):
+    #     path_parts = path.split('/')
+    #     key = path_parts[-(self._consolidate_depth-1):]
+    #     archive = path_parts[:-(self._consolidate_depth-1)]
+    #     return os.path.join(archive) + f'.{self.container_ext}', '.'.join(key)
 
     def _fromh5(self,archive,key):
         # print('In _fromh5')
@@ -319,6 +371,7 @@ class H5_Nested_Store(Store):
             from dask.delayed import delayed
             par = True
             to_run = []
+            append = to_run.append
         except:
             pass
         
@@ -328,12 +381,13 @@ class H5_Nested_Store(Store):
             if par:
                 print('Delaying {}'.format(unique))
                 d = delayed(self._migrate_path_to_archive)(archive,path_name)
-                to_run.append(d)
+                append(d)
                 del d
             else:
                 self._migrate_path_to_archive(archive,path_name)
             
         if par:
+            del append
             to_run = dask.compute(to_run)
         
         #Clean empty directories
@@ -350,14 +404,14 @@ class H5_Nested_Store(Store):
         key = self._normalize_key(key)
         filepath = os.path.join(self.path, key)
         
-        #Attempt to read raw file first
+        #Attempt to read raw file first if it exists
         if os.path.isfile(filepath):
-            # print('In read raw')
             try:
                 return self._fromfile(filepath)
             except:
                 pass
         
+        # Assume file does not exist, determine the name of shard file (archive) and key
         archive, key = self._get_archive_key_name(filepath)
         
         #Attempt to read file from H5
@@ -393,20 +447,11 @@ class H5_Nested_Store(Store):
         if self.distribuited:
             try:
                 lock = self.Lock(name=archive)
-                # start = time.time()
-                # while not lock.acquire(blocking=False):# and not self._timedelta(start, delta=30):
-                #     print(f'{self.uuid}: Waiting for lock {time.time()-start}')
-                #     time.sleep(0.1)
-                #     pass
-                # # print(f'Locking {archive}')
                 with lock:
                     self._toh5(archive, key, value)
             except Exception as e:
                 print(e)
                 pass
-            # finally:
-            #     lock.release()
-            #     # print(f'Releasing {archive}')
         else:
             self._toh5(archive, key, value)
         return
@@ -424,19 +469,10 @@ class H5_Nested_Store(Store):
         if self.distribuited:
             try:
                 lock = self.Lock(name=archive)
-                # start = time.time()
-                # while not lock.acquire(blocking=False):# and not self._timedelta(start, delta=30):
-                #     print(f'{self.uuid}: Waiting for lock {time.time()-start}')
-                #     time.sleep(0.1)
-                #     pass
-                # # print(f'Locking {archive}')
                 with lock:
                     return self._fromh5(archive, key)
             except:
                 raise
-            # finally:
-            #     lock.release()
-            #     # print(f'Releasing {archive}')
         else:
             return self._fromh5(archive, key)
 
@@ -472,7 +508,7 @@ class H5_Nested_Store(Store):
 
         # write to temporary file
         # note we're not using tempfile.NamedTemporaryFile to avoid restrictive file permissions
-        temp_name = file_name + '.' + uuid.uuid4().hex + '.partial'
+        temp_name = f'{file_name}.{uuid.uuid4().hex}.partial'
         temp_path = os.path.join(dir_path, temp_name)
         try:
             self._tofile(value, temp_path)
@@ -490,12 +526,31 @@ class H5_Nested_Store(Store):
     def __delitem__(self, key):
         key = self._normalize_key(key)
         path = os.path.join(self.path, key)
+        
+        #Delete the file if it exists
         if os.path.isfile(path):
             os.remove(path)
         elif os.path.isdir(path):
             # include support for deleting directories, even though strictly
             # speaking these do not exist as keys in the store
             shutil.rmtree(path)
+        
+        # Delete the dset in h5 file if it exists
+        # If a file and h5 dset exist, both will be deleted
+        archive, key = self._get_archive_key_name(path)
+        if os.path.isfile(archive):
+            if self.distribuited:
+                lock = self.Lock(name=archive)
+                with lock:
+                    with h5py.File(archive, 'a', libver='latest', locking=True) as f:
+                        f.swmr_mode = self.swmr
+                        if key in f:
+                            del f[key]
+            else:
+                with h5py.File(archive, 'a', libver='latest', locking=True) as f:
+                    f.swmr_mode = self.swmr
+                    if key in f:
+                        del f[key]
         else:
             raise KeyError(key)
 
@@ -509,18 +564,12 @@ class H5_Nested_Store(Store):
         archive, key = self._get_archive_key_name(file_path)
                 
         if os.path.isfile(archive):
-            if self._zip_contains(archive,key):
-                return True
+             return self._dset_in(archive,key)
         
         #If all other fail to return True
         return False
     
-    @staticmethod
-    def _get_zip_keys(archive):
-        with h5py.File(archive, 'r', libver='latest', swmr=self.swmr) as f:
-            return [key for key in f.keys()]
-    
-    def _zip_contains(self,archive,key):
+    def _dset_in(self,archive,key):
         with h5py.File(archive, 'r', libver='latest', swmr=self.swmr) as f:
             return key in f
         
@@ -530,6 +579,10 @@ class H5_Nested_Store(Store):
             self.path == other.path
         )
 
+    def _get_zip_keys(self,archive):
+        with h5py.File(archive, 'r', libver='latest', swmr=self.swmr) as f:
+            return (key for key in f.keys())
+            
     def keys(self):
         if os.path.exists(self.path):
             yield from self._keys_fast()
@@ -546,13 +599,13 @@ class H5_Nested_Store(Store):
                     basefile, ext = os.path.splitext(f)
                     if ext == self.container_ext:
                         names = self._get_zip_keys(f)
-                        names = ["/".join((dirpath, basefile,x)) for x in names]
+                        names = ("/".join((dirpath, basefile,x)) for x in names)
                         yield from names
-                    elif ext == '.tmp' and os.path.splitext(basefile)[-1] == self.container_ext:
-                        basefile, ext = os.path.splitext(basefile)
-                        names = self._get_zip_keys(f)
-                        names = ["/".join((dirpath, basefile,x)) for x in names]
-                        yield from names
+                    # elif ext == '.tmp' and os.path.splitext(basefile)[-1] == self.container_ext:
+                    #     basefile, ext = os.path.splitext(basefile)
+                    #     names = self._get_zip_keys(f)
+                    #     names = ("/".join((dirpath, basefile,x)) for x in names)
+                    #     yield from names
                     else:
                         yield "/".join((dirpath, f))
 
