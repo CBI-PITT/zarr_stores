@@ -2,7 +2,15 @@
 
 ## This repository offers alternative zarr compatible storage classes
 
-**Nota Bene:**  <u>These storage classes are not endorsed, developed or maintained by the Zarr Developers</u>
+**Nota Bene:**  <u>These storage classes are not endorsed, developed or maintained by the Zarr Developers</u>. In addition, these storage classes have not been vetted or approved by the broader Zarr community. The storage classes deposited herein have been created to meet the specific needs of several ongoing projects. Every effort has been made to ensure that they are drop-in compatible with the current Zarr standards, but we cannot guarantee this. Use at your own risk.
+
+#### Get involved:
+
+If you identify a bug or have a suggestion please [open an issue.](https://github.com/CBI-PITT/zarr_stores/issues)
+
+If you wish to submit a pull request, [do so here](https://github.com/CBI-PITT/zarr_stores/pulls).
+
+If these storage classes have been helpful to you, please [let us know](mailto:alan.watson@pitt.edu).
 
 
 
@@ -94,3 +102,10 @@ hns_from_nds.consolidate()
 # All future chunks written to the array will be written directly to .h5 files, because it was mounted as write_direct=True (default).
 ```
 
+
+
+##### <u>Archived_Nested_Store:</u>
+
+###### Description:
+
+Similar to H5_Nested_Store, this storage class uses zip files to store shards.  The storage class is designed to operate in a similar manner as the H5_Nested_Store but is less well developed and <u>not</u> recommended for general use. There are several disadvantages to using zip to store shards, including the expectation of lower performance comparted to HDF5 and the inability to directly replace chunks inside of a zip file without appending to the file making it inefficient for storing arrays that require multiple writes. This storage class should be used for archival purposes. For example, only write once to the store or operate on a NestedDirectoryStore prior to calling the consolidate() method to convert to the sharded representation. 
