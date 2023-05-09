@@ -102,10 +102,36 @@ hns_from_nds.consolidate()
 # All future chunks written to the array will be written directly to .h5 files, because it was mounted as write_direct=True (default).
 ```
 
+KNOWN ISSUES with H5_Nested_Store:
+
+The consolidate() method will not work for stores with nested groups of arrays. The consolidate() method should only be called on arrays that are on the root path of the H5_Nested_Store.
+
+```python
+hnspath = '/my/store/test_hns_with_groups'
+hnsstore = H5_Nested_Store(hnspath, write_direct=False)
+g = zarr.group(store=hnsstore, overwrite=True)
+g.create_groups('test_group','test_group2')
+test_group = g.test_group
+array = test_group.create_dataset('array',shape=(10,10,10),chunks=(5,5,5),dtype='uint16')
+array[:] = 4
+
+# DO NOT - YOU WILL CORRUPT YOUR STORE - DO NOT
+# hnsstore.consolidate()  # DO NOT
+
+# DO
+hns_root_array = '/my/store/test_hns_with_groups/test_group/array'
+hns_root_array_store = H5_Nested_Store(hns_root_array)
+hns_root_array_store.consolidate()
+
+zarray = zarr.open(hns_root_array_store)
+nd.ndarray.all(zarray[:] == 4)
+# True
+```
+
 
 
 ##### <u>Archived_Nested_Store:</u>
 
 ###### Description:
 
-Similar to H5_Nested_Store, this storage class uses zip files to store shards.  The storage class is designed to operate in a similar manner as the H5_Nested_Store but is less well developed and <u>not</u> recommended for general use. There are several disadvantages to using zip to store shards, including the expectation of lower performance comparted to HDF5 and the inability to directly replace chunks inside of a zip file without appending to the file making it inefficient for storing arrays that require multiple writes. This storage class should be used for archival purposes. For example, only write once to the store or operate on a NestedDirectoryStore prior to calling the consolidate() method to convert to the sharded representation. 
+Similar to H5_Nested_Store, this storage class uses zip files to store shards.  The storage class is designed to operate in a similar manner as the H5_Nested_Store but is less well developed and documented and <u>is not recommended for production use</u>. There are several disadvantages to using zip files to store chunks: 1) there is an expectation of lower performance comparted to HDF5 and 2) chunks cannot be directly replaced inside of a zip file without appending data to the zip file - making it inefficient for storing arrays that require multiple writes. This storage class should be used for archival purposes. For example, only write once to the store or operate on a NestedDirectoryStore prior to calling the consolidate() method to convert to the sharded representation. In general, it is recommended to use H5_Nested_Store instead.
