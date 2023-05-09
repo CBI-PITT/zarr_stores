@@ -439,8 +439,8 @@ class H5_Nested_Store(Store):
         Directly write chunks to h5 file. If distribuited locking is
         enabled, use it; else no external locking.
 
-        h5py locking is enabled by default, making it thread safe, but is may not be
-        multiprocess safe if distribuited locking is disabled.
+        h5py locking is enabled by default, probably making it thread safe, 
+        but is may not be multiprocess safe if distribuited locking is disabled.
         '''
         archive, key = self._get_archive_key_name(file_path)
         os.makedirs(os.path.split(archive)[0], exist_ok=True)
@@ -485,12 +485,17 @@ class H5_Nested_Store(Store):
         # destination path for key
         file_path = os.path.join(self.path, key)
 
-        # Write direct if enabled:
-        if self._write_direct and not '.' in key:
+        # Write direct (to h5 file) if it is enabled:
+            # If '.' is in the file name assume it is a metadata file and skip
+            # If file aready exists assume that a chunks exists in the form of 
+            # a NestedDirectoryStore and skip write direct to overwrite file
+        if self._write_direct and not '.' in key and not os.path.isfile(file_path):
             self._write_direct_to_h5(file_path, value)
             return
 
 
+        ## Everything below here mimics a NestedDirectoryStore ##
+        
         # ensure there is no directory in the way
         if os.path.isdir(file_path):
             shutil.rmtree(file_path)
