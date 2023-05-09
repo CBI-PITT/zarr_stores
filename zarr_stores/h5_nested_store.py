@@ -179,7 +179,7 @@ class H5_Nested_Store(Store):
             except:
                 import warnings
                 warnings.warn("""Dask distribuited failed to import, check whether it is installed
-                              Thread and Process safe locking is disables, data 
+                              Thread and Process safe locking is disabled, data 
                               loss could occur in a parallel computing environment""")
                 distribuited_lock = False
         else:
@@ -187,8 +187,6 @@ class H5_Nested_Store(Store):
                 
         self.distribuited_lock = distribuited_lock
         self._setup_dist_lock()
-        
-        self._arrays = tuple(self._paths_to_arrays())
             
         self._consolidate_depth = consolidate_depth
         self._consolidate = consolidate
@@ -198,8 +196,9 @@ class H5_Nested_Store(Store):
             self._consolidate = False
         self.uuid = uuid.uuid1()
         
-        
-    def _paths_to_arrays(self):
+    
+    @property
+    def _arrays(self):
         
         if os.path.isfile(os.path.join(self.path,'.zarray')):
             yield self.path
