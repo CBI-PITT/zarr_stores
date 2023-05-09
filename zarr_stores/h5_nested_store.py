@@ -280,7 +280,7 @@ class H5_Nested_Store(Store):
         path, last = os.path.split(path)
         key = f'{last}{key}'
         
-        archive = f'{path}.{self.container_ext}'
+        archive = f'{path}{self.container_ext}'
         return archive, key
     
     # def _get_archive_key_name(self,path):
