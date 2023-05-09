@@ -149,7 +149,7 @@ class H5_Nested_Store(Store):
     """
 
     def __init__(self, path, normalize_keys=False, dimension_separator='/', 
-                 write_direct=True, swmr=True, container_ext='h5', distribuited_lock=True,
+                 write_direct=True, swmr=True, container_ext='h5', distribuited_lock=False,
                  consolidate=False, consolidate_depth=3, consolidate_parallel=True 
                  ):
 
