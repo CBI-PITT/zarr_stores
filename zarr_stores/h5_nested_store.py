@@ -187,7 +187,9 @@ class H5_Nested_Store(Store):
                 
         self.distribuited_lock = distribuited_lock
         self._setup_dist_lock()
-
+        
+        self._arrays = tuple(self._paths_to_arrays())
+            
         self._consolidate_depth = consolidate_depth
         self._consolidate = consolidate
         self._consolidate_parallel = consolidate_parallel
@@ -195,7 +197,22 @@ class H5_Nested_Store(Store):
             self.consolidate()
             self._consolidate = False
         self.uuid = uuid.uuid1()
-
+        
+        
+    def _paths_to_arrays(self):
+        
+        if os.path.isfile(os.path.join(self.path,'.zarray')):
+            yield self.path
+        
+        else:
+            for root, folder, files in os.walk(self.path,topdown=False):
+                
+                for f in folder:
+                    test_path = os.path.join(root,f,'.zarray')
+                    if os.path.exists(test_path):
+                        yield os.path.join(root,f)
+            
+            
     def _setup_dist_lock(self):
         if self.distribuited_lock and self._write_direct:
             from distributed import Lock, get_client, Semaphore
@@ -315,8 +332,12 @@ class H5_Nested_Store(Store):
             except OSError:
                 pass
             
-    def path_depth(self,path):
-        startinglevel = self.path.count(os.sep) #Normalization happens at __init__
+    def path_depth(self,path,compare_path=None):
+        
+        if compare_path is None:
+            compare_path = self.path
+        
+        startinglevel = compare_path.count(os.sep) #Normalization happens at __init__
         totallevel = path.count(os.sep)
         # totallevel = os.path.normpath(path).count(os.sep)
         return totallevel - startinglevel
@@ -325,19 +346,20 @@ class H5_Nested_Store(Store):
     def get_unique_archive_locations(self):
         unique_archive_locations = {}
         # past_first = False
-        
-        for root, folder, files in os.walk(self.path,topdown=True):
-            # if past_first:
-            for f in files:
-                filepath = os.path.join(root,f)
-                # print(filepath)
-                if os.path.splitext(filepath)[-1] == '' \
-                    and self.path_depth(filepath) >= self._consolidate_depth:
-
-                    archive,key = self._get_archive_key_name(filepath)
-                    if archive not in unique_archive_locations:
-                        unique_archive_locations[archive] = None
-                        yield archive
+        for a in self._arrays:
+            for root, folder, files in os.walk(a,topdown=True):
+                # if past_first:
+                for f in files:
+                    filepath = os.path.join(root,f)
+                    # print(filepath)
+                    # Filter out metadata files (.zarray) or any files
+                    if '.z' not in f \
+                        and self.path_depth(filepath,a) >= self._consolidate_depth:
+    
+                        archive,key = self._get_archive_key_name(filepath)
+                        if archive not in unique_archive_locations:
+                            unique_archive_locations[archive] = None
+                            yield archive
     
     def _migrate_path_to_archive(self,archive,path_name):
         '''
@@ -391,12 +413,13 @@ class H5_Nested_Store(Store):
             to_run = dask.compute(to_run)
         
         #Clean empty directories
-        for root, folder, files in os.walk(self.path,topdown=False):
-            for f in folder:
-                filepath = os.path.join(root,f)
-                if os.path.exists(filepath) and len(os.listdir(filepath)) == 0:
-                    print('Removing Empty Dir {}'.format(filepath))
-                    shutil.rmtree(filepath)
+        for a in self._arrays:
+            for root, folder, files in os.walk(a,topdown=False):
+                for f in folder:
+                    filepath = os.path.join(root,f)
+                    if os.path.exists(filepath) and len(os.listdir(filepath)) == 0:
+                        print('Removing Empty Dir {}'.format(filepath))
+                        shutil.rmtree(filepath)
         
     
     def __getitem__(self, key):
@@ -586,7 +609,7 @@ class H5_Nested_Store(Store):
 
     def _get_zip_keys(self,archive):
         with h5py.File(archive, 'r', libver='latest', swmr=self.swmr) as f:
-            return (key for key in f.keys())
+            yield tuple(f.keys())
             
     def keys(self):
         if os.path.exists(self.path):
@@ -599,12 +622,14 @@ class H5_Nested_Store(Store):
                 for f in filenames:
                     yield f
             else:
-                dirpath = dirpath.replace("\\", "/")
+                # dirpath = dirpath.replace("\\", "/")
                 for f in filenames:
                     basefile, ext = os.path.splitext(f)
                     if ext == self.container_ext:
-                        names = self._get_zip_keys(f)
-                        names = ("/".join((dirpath, basefile,x)) for x in names)
+                        names = self._get_zip_keys(os.path.join(self.path,dirpath,f))
+                        # Keys are stored in h5 with '.' separator, replace with appropriate separator
+                        names = (x.replace('.',os.path.sep) for x in tuple(names)[0])
+                        names = (os.path.sep.join((dirpath, basefile,x)) for x in names)
                         yield from names
                     # elif ext == '.tmp' and os.path.splitext(basefile)[-1] == self.container_ext:
                     #     basefile, ext = os.path.splitext(basefile)
@@ -612,7 +637,7 @@ class H5_Nested_Store(Store):
                     #     names = ("/".join((dirpath, basefile,x)) for x in names)
                     #     yield from names
                     else:
-                        yield "/".join((dirpath, f))
+                        yield os.path.sep.join((dirpath, f))
 
     def __iter__(self):
         return self.keys()
