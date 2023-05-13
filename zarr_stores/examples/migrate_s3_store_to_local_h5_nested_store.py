@@ -77,6 +77,7 @@ def copy_zarr_chunks(chunk_list,remote_s3_bucket,local_store):
 
 
 # Get all keys (this can take awhile for a large store)
+print('Collecting keys from remote store')
 keys = tuple(remote_store.keys())
 
 # Identify location of arrays
