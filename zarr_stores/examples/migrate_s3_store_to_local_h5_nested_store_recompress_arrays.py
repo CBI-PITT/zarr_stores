@@ -164,7 +164,7 @@ for array_root in array_roots:
         for c in range(max_chunks[-depth]):
             to_process = [x for x in chunks if x[-depth] == c]
             to_process = [chunk_to_slice(chunk,local_array.shape,local_array.chunks) for chunk in to_process]
-            print(f'Total chunks per shard = {to_process}')
+            print(f'Total chunks per shard = {len(to_process)}')
             tmp = delayed(copy_array)(array_location_remote,array_location_local,local_array.chunks,to_process)
             to_run.append(tmp)
     
