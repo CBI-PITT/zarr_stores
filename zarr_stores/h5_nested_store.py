@@ -244,11 +244,11 @@ class H5_Nested_Store(Store):
 
     def __getstate__(self):
         return (self.path, self.normalize_keys, self._dimension_separator, self.swmr, self.container_ext,
-                self._write_direct,self.distribuited,self.distribuited_lock)
+                self._write_direct,self.distribuited,self.distribuited_lock, self._consolidate_depth)
 
     def __setstate__(self, state):
         (self.path, self.normalize_keys, self._dimension_separator, self.swmr, self.container_ext,
-         self._write_direct, self.distribuited,self.distribuited_lock) = state
+         self._write_direct, self.distribuited,self.distribuited_lock, self._consolidate_depth) = state
 
         self.uuid = uuid.uuid1()
         self._setup_dist_lock()
