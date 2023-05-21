@@ -213,26 +213,35 @@ class H5_Nested_Store(Store):
             
             
     def _setup_dist_lock(self):
-        if self.distribuited_lock and self._write_direct:
-            from distributed import Lock, get_client, Semaphore
+        self.distribuited = False
+        self.dist_client = None
+        if self._write_direct and self.distribuited_lock:
+            from distributed import Lock, get_client, worker_client
             '''Try to get client multiple times before erroring'''
             for _ in range(10):
                 self.dist_client = None
                 try:
                     self.Lock = Lock
-                    self.dist_client = get_client()
-                    if self.dist_client.status == 'running':
-                        self.distribuited = True
-                    else:
-                        self.distribuited = False
+                    self.dist_client = worker_client(timeout="10s")
+                    self.distribuited = True
+                    # if self.dist_client.status == 'running':
+                    #     self.distribuited = True
+                    # else:
+                    #     self.distribuited = False
+                # except ValueError:
+                #     self.dist_client = Client()
                 except:
-                    if self.dist_client is not None:
-                        self.dist_client.close()
+                    # print('BROKE TRYING TO GET CLIENT')
+                    # print('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+                    # print(self.dist_client)
+                    # print(self.distribuited)
+                    # print('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+                    # if self.dist_client is not None:
+                    #     self.dist_client.close()
                     self.dist_client = None
                     self.distribuited = False
-                if self.dist_client is not None \
-                    and self.dist_client.status == 'running' \
-                        and self.distribuited:
+                if self.dist_client is not None and self.distribuited:
+                    # print('Connected to distribuited client')
                     break
             if self.dist_client is None or not self.distribuited:
                 self.dist_client = None
@@ -241,6 +250,12 @@ class H5_Nested_Store(Store):
         else:
             self.dist_client = None
             self.distribuited = False
+
+    def __del__(self):
+        pass
+        # if self.distribuited and self.dist_client is not None:
+        #     self.dist_client.close()
+
 
     def __getstate__(self):
         return (self.path, self.normalize_keys, self._dimension_separator, self.swmr, self.container_ext,
@@ -307,7 +322,7 @@ class H5_Nested_Store(Store):
 
     def _fromh5(self,archive,key):
         # print('In _fromh5')
-        with h5py.File(archive, 'r', libver='latest', swmr=self.swmr, locking=True) as f:
+        with h5py.File(archive, 'r', libver='latest', locking=True) as f:
             # print('In file')
             if key in f:
                 # print('Getting Data')
@@ -322,7 +337,7 @@ class H5_Nested_Store(Store):
             # Attempt to catch OSError which sometimes occurs if the h5 file is already open for read only.
             try:
                 with h5py.File(archive, 'a', libver='latest', locking=True) as f:
-                    f.swmr_mode = self.swmr
+                    # f.swmr_mode = self.swmr
                     if key in f:
                         del f[key]
                     f.create_dataset(key, data=np.void(value))
@@ -353,7 +368,7 @@ class H5_Nested_Store(Store):
                     # print(filepath)
                     # Filter out metadata files (.zarray) or any files
                     if '.z' not in f \
-                        and self.path_depth(filepath,a) >= self._consolidate_depth:
+                        and self.path_depth(filepath,a) > self._consolidate_depth:
     
                         archive,key = self._get_archive_key_name(filepath)
                         if archive not in unique_archive_locations:
@@ -368,7 +383,7 @@ class H5_Nested_Store(Store):
 
         print('Moving chunk files into {}'.format(archive))
         with h5py.File(archive, 'a', libver='latest', locking=True) as h:
-            h.swmr_mode = self.swmr
+            # h.swmr_mode = self.swmr
             for root, folder, files in os.walk(path_name, topdown=True):
                 for f in files:
                     filepath = os.path.join(root,f)
@@ -570,12 +585,12 @@ class H5_Nested_Store(Store):
                 lock = self.Lock(name=archive)
                 with lock:
                     with h5py.File(archive, 'a', libver='latest', locking=True) as f:
-                        f.swmr_mode = self.swmr
+                        # f.swmr_mode = self.swmr
                         if key in f:
                             del f[key]
             else:
                 with h5py.File(archive, 'a', libver='latest', locking=True) as f:
-                    f.swmr_mode = self.swmr
+                    # f.swmr_mode = self.swmr
                     if key in f:
                         del f[key]
         else:
@@ -597,7 +612,7 @@ class H5_Nested_Store(Store):
         return False
     
     def _dset_in(self,archive,key):
-        with h5py.File(archive, 'r', libver='latest', swmr=self.swmr) as f:
+        with h5py.File(archive, 'r', libver='latest') as f:
             return key in f
         
     def __eq__(self, other):
@@ -607,7 +622,7 @@ class H5_Nested_Store(Store):
         )
 
     def _get_zip_keys(self,archive):
-        with h5py.File(archive, 'r', libver='latest', swmr=self.swmr) as f:
+        with h5py.File(archive, 'r', libver='latest') as f:
             yield tuple(f.keys())
             
     def keys(self):
