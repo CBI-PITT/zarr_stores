@@ -150,14 +150,15 @@ class H5_Nested_Store(Store):
 
     def __init__(self, path, normalize_keys=False, dimension_separator='/', 
                  write_direct=True, swmr=False, container_ext='h5', distribuited_lock=False,
-                 consolidate=False, consolidate_depth=3, consolidate_parallel=True 
+                 consolidate=False, consolidate_depth=3, consolidate_parallel=True,
+                 auto_verify_write=False
                  ):
 
         # guard conditions
         path = os.path.abspath(path)
         if os.path.exists(path) and not os.path.isdir(path):
             raise FSPathExistNotDir(path)
-        
+
         self.path = os.path.normpath(path)
         self.normalize_keys = normalize_keys
         if dimension_separator is None:
@@ -184,10 +185,13 @@ class H5_Nested_Store(Store):
                 distribuited_lock = False
         else:
             distribuited_lock = False
-                
+
         self.distribuited_lock = distribuited_lock
+
+        self.auto_verify_write = auto_verify_write
+
         self._setup_dist_lock()
-            
+
         self._consolidate_depth = consolidate_depth
         self._consolidate = consolidate
         self._consolidate_parallel = consolidate_parallel
@@ -195,23 +199,23 @@ class H5_Nested_Store(Store):
             self.consolidate()
             self._consolidate = False
         self.uuid = uuid.uuid1()
-        
-    
+
+
     @property
     def _arrays(self):
-        
+
         if os.path.isfile(os.path.join(self.path,'.zarray')):
             yield self.path
-        
+
         else:
             for root, folder, files in os.walk(self.path,topdown=False):
-                
+
                 for f in folder:
                     test_path = os.path.join(root,f,'.zarray')
                     if os.path.exists(test_path):
                         yield os.path.join(root,f)
-            
-            
+
+
     def _setup_dist_lock(self):
         self.distribuited = False
         self.dist_client = None
@@ -259,18 +263,20 @@ class H5_Nested_Store(Store):
 
     def __getstate__(self):
         return (self.path, self.normalize_keys, self._dimension_separator, self.swmr, self.container_ext,
-                self._write_direct,self.distribuited,self.distribuited_lock, self._consolidate_depth)
+                self._write_direct,self.distribuited,self.distribuited_lock, self._consolidate_depth,
+                self.auto_verify_write)
 
     def __setstate__(self, state):
         (self.path, self.normalize_keys, self._dimension_separator, self.swmr, self.container_ext,
-         self._write_direct, self.distribuited,self.distribuited_lock, self._consolidate_depth) = state
+         self._write_direct, self.distribuited,self.distribuited_lock, self._consolidate_depth,
+         self.auto_verify_write) = state
 
         self.uuid = uuid.uuid1()
         self._setup_dist_lock()
 
     def _normalize_key(self, key):
             return key.lower() if self.normalize_keys else key
-    
+
     @staticmethod
     def _fromfile(fn):
         """ Read data from a file
@@ -286,8 +292,7 @@ class H5_Nested_Store(Store):
         with open(fn, 'rb') as f:
             return f.read()
 
-    @staticmethod
-    def _tofile(a, fn):
+    def _tofile(self, a, fn):
         """ Write data to a file
         Parameters
         ----------
@@ -300,9 +305,16 @@ class H5_Nested_Store(Store):
         Subclasses should overload this method to specify any custom
         file writing logic.
         """
-        with open(fn, mode='wb') as f:
-            f.write(a)
-    
+        while True:
+            with open(fn, mode='wb') as f:
+                f.write(a)
+            # Verify contents of file and repeat write if not correct
+            if self.auto_verify_write:
+                if self._fromfile(fn) == bytes(a):
+                    break
+            else:
+                break
+
     def _get_archive_key_name(self,path):
         key = ''
         for _ in range(self._consolidate_depth - 2):
@@ -310,10 +322,10 @@ class H5_Nested_Store(Store):
             key = f'.{last}{key}'
         path, last = os.path.split(path)
         key = f'{last}{key}'
-        
+
         archive = f'{path}{self.container_ext}'
         return archive, key
-    
+
     # def _get_archive_key_name(self,path):
     #     path_parts = path.split('/')
     #     key = path_parts[-(self._consolidate_depth-1):]
@@ -331,6 +343,7 @@ class H5_Nested_Store(Store):
         raise KeyError(key)
 
     def _toh5(self,archive,key,value):
+        times = 0
         if isinstance(value,np.ndarray):
             value = value.tobytes()
         while True:
@@ -342,20 +355,31 @@ class H5_Nested_Store(Store):
                         del f[key]
                     f.create_dataset(key, data=np.void(value))
                     # f.create_dataset(key, data=value)
-                break
             except OSError:
                 pass
-            
+
+            if self.auto_verify_write:
+                times += 1
+                try:
+                    if self._fromh5(archive,key) == value:
+                        break
+                    else:
+                        print(f'Verification failed {times} time, retrying')
+                except KeyError:
+                    print(f'Verification failed {times} time, retrying')
+            else:
+                break
+
     def path_depth(self,path,compare_path=None):
-        
+
         if compare_path is None:
             compare_path = self.path
-        
+
         startinglevel = compare_path.count(os.sep) #Normalization happens at __init__
         totallevel = path.count(os.sep)
         # totallevel = os.path.normpath(path).count(os.sep)
         return totallevel - startinglevel
-    
+
     #Generator to yield unique archive locations for existing raw chunk files
     def get_unique_archive_locations(self):
         unique_archive_locations = {}
@@ -369,12 +393,12 @@ class H5_Nested_Store(Store):
                     # Filter out metadata files (.zarray) or any files
                     if '.z' not in f \
                         and self.path_depth(filepath,a) > self._consolidate_depth:
-    
+
                         archive,key = self._get_archive_key_name(filepath)
                         if archive not in unique_archive_locations:
                             unique_archive_locations[archive] = None
                             yield archive
-    
+
     def _migrate_path_to_archive(self,archive,path_name):
         '''
         Given a H5 name and path, migrate all files under the
@@ -398,7 +422,7 @@ class H5_Nested_Store(Store):
                         h.create_dataset(key, data=np.void(fp.read()))
                     #Delete RAW chunk
                     os.remove(filepath)
-    
+
     def consolidate(self):
 
         par = False
@@ -410,7 +434,7 @@ class H5_Nested_Store(Store):
             append = to_run.append
         except:
             pass
-        
+
         for unique in self.get_unique_archive_locations():
             path_name = os.path.splitext(unique)[0]
             archive = unique
@@ -421,11 +445,11 @@ class H5_Nested_Store(Store):
                 del d
             else:
                 self._migrate_path_to_archive(archive,path_name)
-            
+
         if par:
             del append
             to_run = dask.compute(to_run)
-        
+
         #Clean empty directories
         for a in self._arrays:
             for root, folder, files in os.walk(a,topdown=False):
@@ -434,23 +458,23 @@ class H5_Nested_Store(Store):
                     if os.path.exists(filepath) and len(os.listdir(filepath)) == 0:
                         print('Removing Empty Dir {}'.format(filepath))
                         shutil.rmtree(filepath)
-        
-    
+
+
     def __getitem__(self, key):
         # print('In Get Item')
         key = self._normalize_key(key)
         filepath = os.path.join(self.path, key)
-        
+
         #Attempt to read raw file first if it exists
         if os.path.isfile(filepath):
             try:
                 return self._fromfile(filepath)
             except:
                 pass
-        
+
         # Assume file does not exist, determine the name of shard file (archive) and key
         archive, key = self._get_archive_key_name(filepath)
-        
+
         #Attempt to read file from H5
         if os.path.isfile(archive):
             # print('In read archive')
@@ -461,7 +485,7 @@ class H5_Nested_Store(Store):
                     return self._fromh5(archive,key)
             except:
                 pass
-        
+
         #KeyError if neither RAW file nor key found in H5
         # print('Raising Key Error')
         raise KeyError(key)
@@ -476,8 +500,8 @@ class H5_Nested_Store(Store):
         Directly write chunks to h5 file. If distribuited locking is
         enabled, use it; else no external locking.
 
-        h5py locking is enabled by default, probably making it thread safe, 
-        but is may not be multiprocess safe if distribuited locking is disabled.
+        h5py locking is enabled by default, probably making it thread safe,
+        but it may not be multiprocess safe if distribuited locking is disabled.
         '''
         archive, key = self._get_archive_key_name(file_path)
         os.makedirs(os.path.split(archive)[0], exist_ok=True)
