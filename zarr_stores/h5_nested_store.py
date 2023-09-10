@@ -151,7 +151,7 @@ class H5_Nested_Store(Store):
     def __init__(self, path, normalize_keys=False, dimension_separator='/', 
                  write_direct=True, swmr=False, container_ext='h5', distribuited_lock=False,
                  consolidate=False, consolidate_depth=3, consolidate_parallel=True,
-                 auto_verify_write=False
+                 auto_verify_write=False, mode='a',
                  ):
 
         # guard conditions
@@ -189,6 +189,7 @@ class H5_Nested_Store(Store):
         self.distribuited_lock = distribuited_lock
 
         self.auto_verify_write = auto_verify_write
+        self.mode=mode
 
         self._setup_dist_lock()
 
@@ -473,16 +474,16 @@ class H5_Nested_Store(Store):
                 pass
 
         # Assume file does not exist, determine the name of shard file (archive) and key
-        archive, key = self._get_archive_key_name(filepath)
+        archive, h_key = self._get_archive_key_name(filepath)
 
         #Attempt to read file from H5
         if os.path.isfile(archive):
             # print('In read archive')
             try:
-                if self._write_direct:
-                    return self._read_direct_to_h5(archive,key)
+                if self._write_direct and self.mode != 'r':
+                    return self._read_direct_to_h5(archive,h_key)
                 else:
-                    return self._fromh5(archive,key)
+                    return self._fromh5(archive,h_key)
             except:
                 pass
 
@@ -603,20 +604,20 @@ class H5_Nested_Store(Store):
         
         # Delete the dset in h5 file if it exists
         # If a file and h5 dset exist, both will be deleted
-        archive, key = self._get_archive_key_name(path)
+        archive, h_key = self._get_archive_key_name(path)
         if os.path.isfile(archive):
             if self.distribuited:
                 lock = self.Lock(name=archive)
                 with lock:
                     with h5py.File(archive, 'a', libver='latest', locking=True) as f:
                         # f.swmr_mode = self.swmr
-                        if key in f:
-                            del f[key]
+                        if h_key in f:
+                            del f[h_key]
             else:
                 with h5py.File(archive, 'a', libver='latest', locking=True) as f:
                     # f.swmr_mode = self.swmr
-                    if key in f:
-                        del f[key]
+                    if h_key in f:
+                        del f[h_key]
         else:
             raise KeyError(key)
 
