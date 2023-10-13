@@ -38,6 +38,7 @@ import numpy as np
 import uuid
 import glob
 import re
+import json
 
 from zarr.errors import (
     MetadataError,
@@ -757,6 +758,81 @@ class H5_Nested_Store(Store):
             return size
         else:
             return 0
+
+    @staticmethod
+    def get_offsets(file):
+        '''
+        Collect offsets for each dataset in a .h5 file
+        '''
+        datasets = {}
+        with h5py.File(file) as h5:
+            for key in h5.keys():
+                print(f'Exracting Key {key}')
+                datasets[key] = {
+                    'offset': h5[key].id.get_offset(),
+                    'size': h5[key].id.get_storage_size()
+                }
+        return datasets
+
+    @staticmethod
+    def get_contents(path):
+        with open(path, 'r') as f:
+            return f.read()
+
+    def generate_key_offsets_json(self):
+        '''
+        This function will generate a json file called keys.json in the root of the store
+        AND the root of each array where each entry is an existing key in the store and
+        for each key includes files and bytes offset information for array chunks or
+        the actual metadata information contained inside the zarr metadata files
+        ['.zattrs','.zarray','.zgroup']
+        '''
+        offsets = {}
+        for key in self.keys():
+            if '.zarray' in key or '.zgroup' in key or '.zattrs' in key:
+                file = os.path.join(self.path, key)
+                offsets[key] = {
+                    'file': key,
+                    'contents': self.get_contents(file)
+                }
+            else:
+                archive_key, h5_key = self._get_archive_key_name(key)
+                archive_file = os.path.join(self.path, archive_key)
+                with h5py.File(archive_file) as h5:
+                    print(f'Exracting Key {h5_key} from {archive_key}')
+                    offsets[key] = {
+                        'file': archive_key,
+                        'dset': h5_key,
+                        'offset': h5[h5_key].id.get_offset(),
+                        'size': h5[h5_key].id.get_storage_size()
+                    }
+
+        # Collect all files offsets and metadata contents for entire store
+        array_specific_metadata = {}
+        for array_physical_path in self._arrays:
+            if not array_physical_path in array_specific_metadata:
+                array_specific_metadata[array_physical_path] = {}
+            array_relative_path = array_physical_path.replace(self.path + '/', '')
+            print(array_relative_path)
+            # array is the physical path to where each array is located
+            for key, value in offsets.items():
+                if array_relative_path in key:
+                    key_physical_path = os.path.join(self.path, key)
+                    array_relative_key = key.replace(array_relative_path + '/', '')
+                    new_value = value
+                    new_value['file'] = new_value['file'].replace(array_relative_path + '/', '')
+                    array_specific_metadata[array_physical_path][array_relative_key] = value
+
+        # Save json files
+        offsets_name = 'keys.json'
+        with open(os.path.join(self.path,offsets_name), 'w') as f:
+            json.dump(offsets, f, indent=4)
+
+        for key, value in array_specific_metadata.items():
+            with open(os.path.join(key, offsets_name), 'w') as f:
+                json.dump(value, f, indent=4)
+
+
 
     def clear(self):
         shutil.rmtree(self.path)
