@@ -785,11 +785,33 @@ class H5_Nested_Store(Store):
         AND the root of each array where each entry is an existing key in the store and
         for each key includes files and bytes offset information for array chunks or
         the actual metadata information contained inside the zarr metadata files
-        ['.zattrs','.zarray','.zgroup']
+        ['.zattrs','.zarray','.zgroup'].  This information can be used by the store to enable direct readonly
+        access to contents by bypassing hdf5 and request specific bytes
+
+        This is inspired by the kerchunk project (https://fsspec.github.io/kerchunk/)
+        but tailored for this zarr storage structure to enable
+        low resource library-independent serverless access to data
         '''
+
+        offsets_name = 'key_offsets.json'
+
+        # # Read keys if exists (for testing)
+        # # Save keys.json file at root of store
+        # path = os.path.join(self.path, offsets_name)
+        # if os.path.exists(path):
+        #     print('Reading JSON')
+        #     with open(os.path.join(self.path, offsets_name), 'r') as f:
+        #         offsets = json.load(f)
+        #     print(f'Length of offsets = {len(offsets)}')
+        # else:
+        # Collect info for EVERY key in the whole store
+        opened_h5_files = {}
         offsets = {}
         for key in self.keys():
-            if '.zarray' in key or '.zgroup' in key or '.zattrs' in key:
+            # print(f'{key=}')
+            if key.endswith('.json'):
+                pass
+            elif key.endswith('.zarray') or key.endswith('.zgroup') or key.endswith('.zattrs'):
                 file = os.path.join(self.path, key)
                 offsets[key] = {
                     'file': key,
@@ -798,39 +820,48 @@ class H5_Nested_Store(Store):
             else:
                 archive_key, h5_key = self._get_archive_key_name(key)
                 archive_file = os.path.join(self.path, archive_key)
-                with h5py.File(archive_file) as h5:
-                    print(f'Exracting Key {h5_key} from {archive_key}')
-                    offsets[key] = {
-                        'file': archive_key,
-                        'dset': h5_key,
-                        'offset': h5[h5_key].id.get_offset(),
-                        'size': h5[h5_key].id.get_storage_size()
-                    }
+                if archive_file not in opened_h5_files:
+                    opened_h5_files[archive_file] = h5py.File(archive_file)
+                print(f'Extracting Key {h5_key} from {archive_key}')
+                offsets[key] = {
+                    'file': archive_key,
+                    'dset': h5_key,
+                    'offset': opened_h5_files[archive_file][h5_key].id.get_offset(),
+                    'size': opened_h5_files[archive_file][h5_key].id.get_storage_size()
+                }
 
-        # Collect all files offsets and metadata contents for entire store
-        array_specific_metadata = {}
+        for ii in opened_h5_files:
+            print(f'Closing {ii}')
+            opened_h5_files[ii].close()
+
+        ## Save key_offsets.json file at root of store
+        with open(os.path.join(self.path, offsets_name), 'w') as f:
+            json.dump(offsets, f, indent=4)
+
+        store_physical_path = self.path
+        if not store_physical_path.endswith('/'):
+            store_physical_path += '/'
+        print(f'{store_physical_path=}')
+
+        #Collect all files offsets and metadata contents for entire store
         for array_physical_path in self._arrays:
-            if not array_physical_path in array_specific_metadata:
-                array_specific_metadata[array_physical_path] = {}
-            array_relative_path = array_physical_path.replace(self.path + '/', '')
+            print(f'{array_physical_path}')
+            array_specific_metadata = {}
+            array_relative_path = array_physical_path.replace(store_physical_path, '')
             print(array_relative_path)
             # array is the physical path to where each array is located
             for key, value in offsets.items():
-                if array_relative_path in key:
+                if key.startswith(array_relative_path):
+                    print(f'Rewriting {key} for array {array_relative_path}')
                     key_physical_path = os.path.join(self.path, key)
                     array_relative_key = key.replace(array_relative_path + '/', '')
                     new_value = value
                     new_value['file'] = new_value['file'].replace(array_relative_path + '/', '')
-                    array_specific_metadata[array_physical_path][array_relative_key] = value
+                    array_specific_metadata[array_relative_key] = value
 
-        # Save json files
-        offsets_name = 'keys.json'
-        with open(os.path.join(self.path,offsets_name), 'w') as f:
-            json.dump(offsets, f, indent=4)
-
-        for key, value in array_specific_metadata.items():
-            with open(os.path.join(key, offsets_name), 'w') as f:
-                json.dump(value, f, indent=4)
+            # Write JSON file to disk
+            with open(os.path.join(array_physical_path, offsets_name), 'w') as f:
+                json.dump(array_specific_metadata, f, indent=4)
 
 
 
