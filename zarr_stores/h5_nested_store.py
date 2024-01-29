@@ -336,12 +336,19 @@ class H5_Nested_Store(Store):
 
     def _fromh5(self,archive,key):
         # print('In _fromh5')
-        with h5py.File(archive, 'r', libver='latest', locking=True) as f:
-            # print('In file')
-            if key in f:
-                # print('Getting Data')
-                # return f[key].tobytes()
-                return f[key][()].tobytes()
+        # with h5py.File(archive, 'r', libver='latest', locking=True) as f:
+        #     # print('In file')
+        #     if key in f:
+        #         # return f[key][()].tobytes()
+
+        # if self._dset_in(archive, key):
+        with h5py.File(archive, 'r', libver='latest', locking=False) as f:
+            offset = f[key].id.get_offset()
+            size = f[key].id.get_storage_size()
+        with open(archive, 'rb') as f:
+            f.seek(offset)
+            return f.read(size)
+
         raise KeyError(key)
 
     def _toh5(self,archive,key,value):
@@ -808,6 +815,11 @@ class H5_Nested_Store(Store):
         opened_h5_files = {}
         offsets = {}
         for key in self.keys():
+            if len(opened_h5_files) > 2:
+                for ii in tuple(opened_h5_files.keys()):
+                    print(f'Closing {ii}')
+                    opened_h5_files[ii].close()
+                    del opened_h5_files[ii]
             # print(f'{key=}')
             if key.endswith('.json'):
                 pass
@@ -822,13 +834,14 @@ class H5_Nested_Store(Store):
                 archive_file = os.path.join(self.path, archive_key)
                 if archive_file not in opened_h5_files:
                     opened_h5_files[archive_file] = h5py.File(archive_file)
-                print(f'Extracting Key {h5_key} from {archive_key}')
+                print(f'Extracting Key {h5_key} from {archive_key}                       ', end='\r')
                 offsets[key] = {
                     'file': archive_key,
                     'dset': h5_key,
                     'offset': opened_h5_files[archive_file][h5_key].id.get_offset(),
                     'size': opened_h5_files[archive_file][h5_key].id.get_storage_size()
                 }
+
 
         for ii in opened_h5_files:
             print(f'Closing {ii}')
