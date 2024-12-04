@@ -645,7 +645,7 @@ class H5_Nested_Store(Store):
         return False
     
     def _dset_in(self,archive,key):
-        with h5py.File(archive, 'r', libver='latest') as f:
+        with h5py.File(archive, 'r', libver='latest',locking=False) as f:
             return key in f
         
     def __eq__(self, other):
