@@ -335,12 +335,18 @@ class H5_Nested_Store(Store):
 
     def _fromh5(self,archive,key):
         # print('In _fromh5')
-        with h5py.File(archive, 'r', libver='latest', locking=True) as f:
-            # print('In file')
-            if key in f:
-                # print('Getting Data')
-                # return f[key].tobytes()
-                return f[key][()].tobytes()
+        # with h5py.File(archive, 'r', libver='latest', locking=True) as f:
+        #     # print('In file')
+        #     if key in f:
+        #         # print('Getting Data')
+        #         # return f[key].tobytes()
+        #         return f[key][()].tobytes()
+        with h5py.File(archive, 'r', libver='latest', locking=False) as f:
+            offset = f[key].id.get_offset()
+            size = f[key].id.get_storage_size()
+        with open(archive, 'rb') as f:
+            f.seek(offset)
+            return f.read(size) 
         raise KeyError(key)
 
     def _toh5(self,archive,key,value):
