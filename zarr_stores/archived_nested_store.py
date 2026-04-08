@@ -44,16 +44,39 @@ import re
 
 from zipfile import ZipFile
 
-from zarr.errors import (
-    MetadataError,
-    BadCompressorError,
-    ContainsArrayError,
-    ContainsGroupError,
-    FSPathExistNotDir,
-    ReadOnlyError,
-)
-
 from numcodecs.abc import Codec
+# ---- Zarr v3 compatibility layer ----
+from zarr.abc.store import (
+    Store,
+    ByteRequest,
+    RangeByteRequest,
+    OffsetByteRequest,
+    SuffixByteRequest,
+)
+from zarr.core.buffer import default_buffer_prototype
+
+# Zarr v2 metadata keys (Zarr-Python 3 can still read these)
+V2_ARRAY_META_KEY = ".zarray"
+V3_META_KEY = "zarr.json"
+
+def _normalize_storage_path(path: str | None) -> str:
+    if path is None:
+        return ""
+    # Zarr uses POSIX-style paths inside stores
+    p = str(path).lstrip("/").replace("\\", "/")
+    return p.strip("/")
+
+def _retry_call(func, args=(), exceptions=(PermissionError,), retries: int = 10, delay: float = 0.05):
+    import time
+    for i in range(retries):
+        try:
+            return func(*args)
+        except exceptions:
+            if i == retries - 1:
+                raise
+            time.sleep(delay)
+
+
 from numcodecs.compat import (
     ensure_bytes,
     ensure_text,
@@ -66,14 +89,6 @@ from numcodecs.compat import (
 from threading import Lock, RLock
 # from filelock import Timeout, FileLock, SoftFileLock
 
-from zarr.util import (buffer_size, json_loads, nolock, normalize_chunks,
-                       normalize_dimension_separator,
-                       normalize_dtype, normalize_fill_value, normalize_order,
-                       normalize_shape, normalize_storage_path, retry_call)
-
-from zarr._storage.absstore import ABSStore  # noqa: F401
-
-from zarr._storage.store import Store, array_meta_key
 
 _prog_number = re.compile(r'^\d+$')
 
@@ -125,13 +140,15 @@ class Archived_Nested_Store(Store):
     Safe to write in multiple threads or processes.
     """
 
-    def __init__(self, path, normalize_keys=False, dimension_separator=None, 
-                 consolidate=False, consolidate_depth=3, consolidate_parallel=True):
+    def __init__(self, path, normalize_keys=False, dimension_separator='/', 
+                 consolidate=False, consolidate_depth=3, consolidate_parallel=True,mode='a'):
+
+        super().__init__(read_only=(mode=='r'))
 
         # guard conditions
         path = os.path.abspath(path)
         if os.path.exists(path) and not os.path.isdir(path):
-            raise FSPathExistNotDir(path)
+            raise NotADirectoryError(path)
         
         self.path = os.path.normpath(path)
         self.normalize_keys = normalize_keys
@@ -487,7 +504,7 @@ class Archived_Nested_Store(Store):
             # move temporary file into place;
             # make several attempts at writing the temporary file to get past
             # potential antivirus file locking issues
-            retry_call(os.replace, (temp_path, file_path), exceptions=(PermissionError,))
+            _retry_call(os.replace, (temp_path, file_path), exceptions=(PermissionError,))
 
         finally:
             # clean up if temp file still exists for whatever reason
@@ -575,7 +592,7 @@ class Archived_Nested_Store(Store):
         return sum(1 for _ in self.keys())
 
     def dir_path(self, path=None):
-        store_path = normalize_storage_path(path)
+        store_path = _normalize_storage_path(path)
         dir_path = self.path
         if store_path:
             dir_path = os.path.join(dir_path, store_path)
@@ -594,7 +611,7 @@ class Archived_Nested_Store(Store):
 
     def _nested_listdir(self, path=None):
         children = self._flat_listdir(path=path)
-        if array_meta_key in children:
+        if V2_ARRAY_META_KEY in children:
             # special handling of directories containing an array to map nested chunk
             # keys back to standard chunk keys
             new_children = []
@@ -614,8 +631,8 @@ class Archived_Nested_Store(Store):
             return children
 
     def rename(self, src_path, dst_path):
-        store_src_path = normalize_storage_path(src_path)
-        store_dst_path = normalize_storage_path(dst_path)
+        store_src_path = _normalize_storage_path(src_path)
+        store_dst_path = _normalize_storage_path(dst_path)
 
         dir_path = self.path
 
@@ -625,7 +642,7 @@ class Archived_Nested_Store(Store):
         os.renames(src_path, dst_path)
 
     def rmdir(self, path=None):
-        store_path = normalize_storage_path(path)
+        store_path = _normalize_storage_path(path)
         dir_path = self.path
         if store_path:
             dir_path = os.path.join(dir_path, store_path)
@@ -633,7 +650,7 @@ class Archived_Nested_Store(Store):
             shutil.rmtree(dir_path)
 
     def getsize(self, path=None):
-        store_path = normalize_storage_path(path)
+        store_path = _normalize_storage_path(path)
         fs_path = self.path
         if store_path:
             fs_path = os.path.join(fs_path, store_path)
@@ -674,3 +691,85 @@ class Archived_Nested_Store(Store):
             elif isdir(p):
                 rmtree(p)
 
+
+
+
+    # ---- Zarr v3 Store API (async) ----
+    @property
+    def supports_writes(self) -> bool:
+        return not self.read_only
+
+    @property
+    def supports_deletes(self) -> bool:
+        return not self.read_only
+
+    @property
+    def supports_listing(self) -> bool:
+        return True
+
+    async def get(self, key: str, prototype=None, byte_range: ByteRequest | None = None):
+        if prototype is None:
+            prototype = default_buffer_prototype()
+        try:
+            data = self.__getitem__(key)
+        except KeyError:
+            return None
+        if byte_range is not None:
+            if isinstance(byte_range, RangeByteRequest):
+                data = data[byte_range.start:byte_range.end]
+            elif isinstance(byte_range, OffsetByteRequest):
+                data = data[byte_range.offset:]
+            elif isinstance(byte_range, SuffixByteRequest):
+                data = data[-byte_range.suffix:]
+        return prototype.buffer.from_bytes(data)
+
+    async def get_partial_values(self, prototype, key_ranges):
+        if prototype is None:
+            prototype = default_buffer_prototype()
+        out = []
+        for k, r in key_ranges:
+            out.append(await self.get(k, prototype=prototype, byte_range=r))
+        return out
+
+    async def exists(self, key: str) -> bool:
+        return self.__contains__(key)
+
+    async def set(self, key: str, value) -> None:
+        if self.read_only:
+            raise PermissionError("Store is read-only")
+        data = value.to_bytes() if hasattr(value, "to_bytes") else bytes(value)
+        self.__setitem__(key, data)
+
+    async def delete(self, key: str) -> None:
+        if self.read_only:
+            raise PermissionError("Store is read-only")
+        self.__delitem__(key)
+
+    def list(self):
+        async def gen():
+            for k in self.keys():
+                yield k.replace(os.path.sep, "/")
+        return gen()
+
+    def list_prefix(self, prefix: str):
+        prefix = prefix.lstrip("/")
+        async def gen():
+            for k in self.keys():
+                k2 = k.replace(os.path.sep, "/")
+                if k2.startswith(prefix):
+                    yield k2
+        return gen()
+
+    def list_dir(self, prefix: str):
+        prefix = prefix.lstrip("/")
+        if prefix != "" and not prefix.endswith("/"):
+            prefix += "/"
+        async def gen():
+            seen = set()
+            async for k in self.list_prefix(prefix):
+                rest = k[len(prefix):]
+                first = rest.split("/", 1)[0]
+                if first and first not in seen:
+                    seen.add(first)
+                    yield prefix + first
+        return gen()
