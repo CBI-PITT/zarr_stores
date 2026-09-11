@@ -8,6 +8,38 @@
 
 If you identify a bug or have a suggestion please [open an issue.](https://github.com/CBI-PITT/zarr_stores/issues)
 
+## Convert OME-HAN to OME-Zarr v2
+
+The converter reads an `.omehans` store chunk by chunk and writes a standard
+directory-based OME-Zarr using Zarr format 2. It rebuilds each multiscale from
+level 0 as a 2x2x2 Z/Y/X octree with 128x128x128 spatial chunks. Intensity
+images use block-mean downsampling; label pyramids use nearest-neighbor
+downsampling. A Zarr-v3 source's `ome.multiscales` metadata is translated to
+the v2 `multiscales` layout and the scale transforms are updated per level.
+
+```python
+from zarr_stores.omehans_to_ome_zarr import convert_omehans_to_ome_zarr
+
+result = convert_omehans_to_ome_zarr(
+    "input.omehans",
+    "output.ome.zarr",
+    verify=True,
+)
+print(result)
+```
+
+The same operation is available from the command line:
+
+```bash
+python -m zarr_stores.omehans_to_ome_zarr \
+    input.omehans output.ome.zarr --verify
+```
+
+Existing destinations are refused unless `overwrite=True` (Python) or
+`--overwrite` (CLI) is supplied. Conversion is blockwise; with the default
+settings, each downsampling read covers at most 256x256x256 spatial voxels for
+one non-spatial chunk coordinate.
+
 If you wish to submit a pull request, [do so here](https://github.com/CBI-PITT/zarr_stores/pulls).
 
 If these storage classes have been helpful to you, please [let us know](mailto:alan.watson@pitt.edu).

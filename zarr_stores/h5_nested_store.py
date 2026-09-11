@@ -795,7 +795,6 @@ class H5_Nested_Store(Store):
             consolidate_parallel=self._consolidate_parallel,
             auto_verify_write=self.auto_verify_write,
             mode=mode,
-            zarr_version=self.zarr_version,
         )
 
     async def get(self, key: str, prototype=None, byte_range: ByteRequest | None = None):
@@ -864,5 +863,7 @@ class H5_Nested_Store(Store):
                 first = rest.split("/", 1)[0]
                 if first and first not in seen:
                     seen.add(first)
-                    yield prefix + first
+                    # Store.list_dir returns names relative to the requested
+                    # prefix (matching LocalStore), not full store keys.
+                    yield first
         return gen()
