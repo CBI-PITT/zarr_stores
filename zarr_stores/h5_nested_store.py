@@ -853,17 +853,53 @@ class H5_Nested_Store(Store):
         return gen()
 
     def list_dir(self, prefix: str):
-        prefix = prefix.lstrip("/")
-        if prefix != "" and not prefix.endswith("/"):
-            prefix += "/"
+        prefix = prefix.strip("/")
+
         async def gen():
             seen = set()
-            async for k in self.list_prefix(prefix):
-                rest = k[len(prefix):]
-                first = rest.split("/", 1)[0]
-                if first and first not in seen:
-                    seen.add(first)
-                    # Store.list_dir returns names relative to the requested
-                    # prefix (matching LocalStore), not full store keys.
-                    yield first
+
+            # Group and raw-chunk directories can be listed directly.  The old
+            # implementation called list_prefix(), which expanded every HDF5
+            # shard in the entire store just to discover immediate children.
+            # On large OME-HAN datasets this turned a metadata lookup into a
+            # full-store scan.
+            base = self.dir_path(prefix)
+            if os.path.isdir(base):
+                for entry in scandir(base):
+                    name = entry.name
+                    if entry.is_file() and name.endswith(self.container_ext):
+                        name = name[: -len(self.container_ext)]
+                    if name and name not in seen:
+                        seen.add(name)
+                        yield name
+                return
+
+            # A logical prefix may point inside an HDF5 shard. Walk toward the
+            # store root until its archive is found, then list only the matching
+            # immediate dataset children from that one shard.
+            candidate = base
+            internal_parts = []
+            root = os.path.abspath(self.path)
+            while os.path.abspath(candidate).startswith(root):
+                archive = candidate + self.container_ext
+                if os.path.isfile(archive):
+                    internal_prefix = "/".join(internal_parts)
+                    with h5py.File(archive, "r", libver="latest", locking=True) as h5:
+                        for key in h5.keys():
+                            logical_key = key.replace(".", "/")
+                            if internal_prefix:
+                                marker = internal_prefix + "/"
+                                if not logical_key.startswith(marker):
+                                    continue
+                                logical_key = logical_key[len(marker) :]
+                            first = logical_key.split("/", 1)[0]
+                            if first and first not in seen:
+                                seen.add(first)
+                                yield first
+                    return
+                if os.path.abspath(candidate) == root:
+                    return
+                candidate, last = os.path.split(candidate)
+                internal_parts.insert(0, last)
+
         return gen()

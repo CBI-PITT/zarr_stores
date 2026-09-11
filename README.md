@@ -28,6 +28,14 @@ result = convert_omehans_to_ome_zarr(
 print(result)
 ```
 
+For a small end-to-end trial, crop level 0 from the spatial origin before
+building the pyramid:
+
+```bash
+python -m zarr_stores.omehans_to_ome_zarr \
+    input.omehans small.ome.zarr --crop-zyx 128 512 512 --workers 4
+```
+
 The same operation is available from the command line:
 
 ```bash

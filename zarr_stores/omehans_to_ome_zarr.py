@@ -211,10 +211,19 @@ async def _copy_array(
     progress: ProgressCallback | None,
     workers: int,
     output_chunks: Sequence[int] | None = None,
+    output_shape: Sequence[int] | None = None,
 ) -> tuple[int, int, Any]:
     source_format = source.metadata.zarr_format
+    copy_shape = tuple(output_shape) if output_shape is not None else source.shape
+    if len(copy_shape) != source.ndim:
+        raise ValueError("output_shape must match the source dimensions")
+    if any(
+        output > source_size
+        for output, source_size in zip(copy_shape, source.shape)
+    ):
+        raise ValueError("output_shape cannot exceed the source shape")
     create_kwargs: dict[str, Any] = {
-        "shape": source.shape,
+        "shape": copy_shape,
         "dtype": source.dtype,
         "chunks": tuple(output_chunks) if output_chunks is not None else source.chunks,
         "fill_value": source.metadata.fill_value,
@@ -227,14 +236,14 @@ async def _copy_array(
     if source_format == 2:
         create_kwargs["filters"] = source.filters
         if compressor == "source":
-            create_kwargs["compressor"] = source.compressor
+            create_kwargs["compressors"] = source.compressors
     if compressor != "source":
-        create_kwargs["compressor"] = compressor
+        create_kwargs["compressors"] = compressor
 
     destination = await destination_group.create_array(name, **create_kwargs)
     copy_chunks = tuple(output_chunks) if output_chunks is not None else source.chunks
     total = math.prod(
-        math.ceil(size / chunk) for size, chunk in zip(source.shape, copy_chunks)
+        math.ceil(size / chunk) for size, chunk in zip(copy_shape, copy_chunks)
     )
     if len(source.shape) == 0:
         total = 1
@@ -252,7 +261,7 @@ async def _copy_array(
         return int(np.asarray(data).nbytes)
 
     logical_bytes = await _run_chunk_workers(
-        _chunk_selections(source.shape, copy_chunks),
+        _chunk_selections(copy_shape, copy_chunks),
         total=total,
         workers=workers,
         process=process,
@@ -293,9 +302,9 @@ async def _downsample_level(
     if template.metadata.zarr_format == 2:
         create_kwargs["filters"] = template.filters
         if compressor == "source":
-            create_kwargs["compressor"] = template.compressor
+            create_kwargs["compressors"] = template.compressors
     if compressor != "source":
-        create_kwargs["compressor"] = compressor
+        create_kwargs["compressors"] = compressor
     destination = await destination_group.create_array(name, **create_kwargs)
 
     total = math.prod(
@@ -347,6 +356,7 @@ async def _copy_octree(
     progress: ProgressCallback | None,
     label_data: bool,
     workers: int,
+    crop_zyx: Sequence[int] | None,
 ) -> tuple[int, int, int, dict[str, Any]]:
     datasets = multiscale.get("datasets") or []
     if not datasets:
@@ -354,6 +364,10 @@ async def _copy_octree(
     source_level_zero = await source_group.getitem(datasets[0]["path"])
     spatial_axes = _spatial_axes(multiscale, source_level_zero.ndim)
     chunks = _octree_chunks(source_level_zero.ndim, spatial_axes, spatial_chunk_size)
+    level_zero_shape = list(source_level_zero.shape)
+    if crop_zyx is not None:
+        for axis, requested_size in zip(spatial_axes, crop_zyx):
+            level_zero_shape[axis] = min(level_zero_shape[axis], requested_size)
 
     first_path = f"{prefix}/0" if prefix else "0"
     chunk_count, logical_bytes, previous = await _copy_array(
@@ -367,6 +381,7 @@ async def _copy_octree(
         progress=progress,
         workers=workers,
         output_chunks=chunks,
+        output_shape=level_zero_shape,
     )
     array_count = 1
     while any(previous.shape[axis] > spatial_chunk_size for axis in spatial_axes):
@@ -409,6 +424,7 @@ async def _copy_group(
     progress: ProgressCallback | None,
     spatial_chunk_size: int,
     workers: int,
+    crop_zyx: Sequence[int] | None,
 ) -> tuple[int, int, int]:
     attributes = _v2_attributes(source.attrs)
     array_count = chunk_count = logical_bytes = 0
@@ -434,6 +450,7 @@ async def _copy_group(
             progress=progress,
             label_data=label_data,
             workers=workers,
+            crop_zyx=crop_zyx,
         )
         attributes["multiscales"] = [converted]
         array_count += arrays
@@ -484,6 +501,7 @@ async def _copy_group(
             progress=progress,
             spatial_chunk_size=spatial_chunk_size,
             workers=workers,
+            crop_zyx=crop_zyx,
         )
         array_count += arrays
         chunk_count += chunks
@@ -503,6 +521,7 @@ async def async_convert_omehans_to_ome_zarr(
     progress: ProgressCallback | None = None,
     spatial_chunk_size: int = 128,
     workers: int = 1,
+    crop_zyx: Sequence[int] | None = None,
 ) -> ConversionResult:
     """Asynchronously convert to a standard, directory-based OME-Zarr v2.
 
@@ -533,6 +552,9 @@ async def async_convert_omehans_to_ome_zarr(
     workers:
         Maximum number of chunks processed concurrently within one pyramid
         level. Pyramid levels themselves remain sequential. Default is 1.
+    crop_zyx:
+        Optional maximum Z/Y/X shape copied from the spatial origin of level 0.
+        The output pyramid is rebuilt from this cropped volume.
     """
 
     source_path = Path(source).expanduser().resolve()
@@ -552,6 +574,10 @@ async def async_convert_omehans_to_ome_zarr(
         raise ValueError("spatial_chunk_size must be positive")
     if workers < 1:
         raise ValueError("workers must be positive")
+    if crop_zyx is not None:
+        crop_zyx = tuple(crop_zyx)
+        if len(crop_zyx) != 3 or any(size < 1 for size in crop_zyx):
+            raise ValueError("crop_zyx must contain three positive integers")
 
     from zarr.api.asynchronous import open_group
 
@@ -571,6 +597,7 @@ async def async_convert_omehans_to_ome_zarr(
         progress=progress,
         spatial_chunk_size=spatial_chunk_size,
         workers=workers,
+        crop_zyx=crop_zyx,
     )
     return ConversionResult(
         source=source_path,
@@ -592,6 +619,7 @@ def convert_omehans_to_ome_zarr(
     progress: ProgressCallback | None = None,
     spatial_chunk_size: int = 128,
     workers: int = 1,
+    crop_zyx: Sequence[int] | None = None,
 ) -> ConversionResult:
     """Synchronous wrapper for :func:`async_convert_omehans_to_ome_zarr`.
 
@@ -610,6 +638,7 @@ def convert_omehans_to_ome_zarr(
             progress=progress,
             spatial_chunk_size=spatial_chunk_size,
             workers=workers,
+            crop_zyx=crop_zyx,
         )
     )
 
@@ -623,6 +652,13 @@ def _main() -> None:
     parser.add_argument("--no-compression", action="store_true")
     parser.add_argument(
         "--workers", type=int, default=1, help="concurrent chunks per pyramid level"
+    )
+    parser.add_argument(
+        "--crop-zyx",
+        type=int,
+        nargs=3,
+        metavar=("Z", "Y", "X"),
+        help="copy at most Z Y X voxels from the level-0 spatial origin",
     )
     args = parser.parse_args()
 
@@ -638,6 +674,7 @@ def _main() -> None:
         compressor=None if args.no_compression else "source",
         progress=show_progress,
         workers=args.workers,
+        crop_zyx=args.crop_zyx,
     )
     print(
         f"Converted {result.arrays} arrays, {result.chunks} chunks "
