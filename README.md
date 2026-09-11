@@ -32,13 +32,18 @@ The same operation is available from the command line:
 
 ```bash
 python -m zarr_stores.omehans_to_ome_zarr \
-    input.omehans output.ome.zarr --verify
+    input.omehans output.ome.zarr --workers 4
 ```
 
 Existing destinations are refused unless `overwrite=True` (Python) or
 `--overwrite` (CLI) is supplied. Conversion is blockwise; with the default
 settings, each downsampling read covers at most 256x256x256 spatial voxels for
 one non-spatial chunk coordinate.
+
+`--workers` enables bounded chunk-level parallelism within each pyramid level.
+Levels remain sequential because every level depends on the previous one. Start
+with 4 workers and 32 GB RAM; increase only after observing memory and storage
+throughput.
 
 If you wish to submit a pull request, [do so here](https://github.com/CBI-PITT/zarr_stores/pulls).
 

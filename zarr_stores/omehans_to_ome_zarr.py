@@ -16,7 +16,7 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator, Sequence
+from typing import Any, Awaitable, Callable, Iterable, Iterator, Sequence
 
 import numpy as np
 
@@ -24,6 +24,7 @@ from .h5_nested_store import H5_Nested_Store
 
 
 ProgressCallback = Callable[[str, int, int], None]
+ChunkProcessor = Callable[[tuple[slice, ...]], Awaitable[int]]
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,40 @@ def _chunk_selections(
             slice(index * chunk, min((index + 1) * chunk, size))
             for index, chunk, size in zip(coordinate, chunks, shape)
         )
+
+
+async def _run_chunk_workers(
+    selections: Iterable[tuple[slice, ...]],
+    *,
+    total: int,
+    workers: int,
+    process: ChunkProcessor,
+    path: str,
+    progress: ProgressCallback | None,
+) -> int:
+    """Process selections with a bounded number of concurrent tasks."""
+
+    iterator = iter(selections)
+    completed = 0
+
+    async def run_worker() -> int:
+        nonlocal completed
+        logical_bytes = 0
+        while True:
+            try:
+                selection = next(iterator)
+            except StopIteration:
+                return logical_bytes
+            logical_bytes += await process(selection)
+            completed += 1
+            if progress is not None:
+                progress(path, completed, total)
+
+    tasks: list[asyncio.Task[int]] = []
+    async with asyncio.TaskGroup() as task_group:
+        for _ in range(min(workers, max(total, 1))):
+            tasks.append(task_group.create_task(run_worker()))
+    return sum(task.result() for task in tasks)
 
 
 def _spatial_axes(multiscale: dict[str, Any], ndim: int) -> tuple[int, int, int]:
@@ -174,6 +209,7 @@ async def _copy_array(
     dimension_separator: str,
     verify: bool,
     progress: ProgressCallback | None,
+    workers: int,
     output_chunks: Sequence[int] | None = None,
 ) -> tuple[int, int, Any]:
     source_format = source.metadata.zarr_format
@@ -202,11 +238,8 @@ async def _copy_array(
     )
     if len(source.shape) == 0:
         total = 1
-    logical_bytes = 0
 
-    for completed, selection in enumerate(
-        _chunk_selections(source.shape, copy_chunks), start=1
-    ):
+    async def process(selection: tuple[slice, ...]) -> int:
         data = await source.getitem(selection if selection else ())
         if selection:
             await destination.setitem(selection, data)
@@ -214,11 +247,18 @@ async def _copy_array(
         else:
             await destination.setitem((), data)
             written = await destination.getitem(()) if verify else None
-        logical_bytes += int(np.asarray(data).nbytes)
         if verify:
             np.testing.assert_array_equal(written, data)
-        if progress is not None:
-            progress(path, completed, total)
+        return int(np.asarray(data).nbytes)
+
+    logical_bytes = await _run_chunk_workers(
+        _chunk_selections(source.shape, copy_chunks),
+        total=total,
+        workers=workers,
+        process=process,
+        path=path,
+        progress=progress,
+    )
 
     return total, logical_bytes, destination
 
@@ -236,6 +276,8 @@ async def _downsample_level(
     dimension_separator: str,
     verify: bool,
     progress: ProgressCallback | None,
+    workers: int,
+    path: str,
 ) -> tuple[int, int, Any]:
     output_shape = tuple(
         math.ceil(size / 2) if axis in spatial_axes else size
@@ -259,10 +301,8 @@ async def _downsample_level(
     total = math.prod(
         math.ceil(size / chunk) for size, chunk in zip(output_shape, chunks)
     )
-    logical_bytes = 0
-    for completed, output_selection in enumerate(
-        _chunk_selections(output_shape, chunks), start=1
-    ):
+
+    async def process(output_selection: tuple[slice, ...]) -> int:
         input_selection = tuple(
             slice(part.start * 2, min(part.stop * 2, source.shape[axis]))
             if axis in spatial_axes
@@ -270,15 +310,27 @@ async def _downsample_level(
             for axis, part in enumerate(output_selection)
         )
         source_data = np.asarray(await source.getitem(input_selection))
-        data = _downsample_2x(source_data, spatial_axes, method)
+        if workers > 1:
+            data = await asyncio.to_thread(
+                _downsample_2x, source_data, spatial_axes, method
+            )
+        else:
+            data = _downsample_2x(source_data, spatial_axes, method)
         await destination.setitem(output_selection, data)
-        logical_bytes += int(data.nbytes)
         if verify:
             np.testing.assert_array_equal(
                 await destination.getitem(output_selection), data
             )
-        if progress is not None:
-            progress(name, completed, total)
+        return int(data.nbytes)
+
+    logical_bytes = await _run_chunk_workers(
+        _chunk_selections(output_shape, chunks),
+        total=total,
+        workers=workers,
+        process=process,
+        path=path,
+        progress=progress,
+    )
     return total, logical_bytes, destination
 
 
@@ -294,6 +346,7 @@ async def _copy_octree(
     verify: bool,
     progress: ProgressCallback | None,
     label_data: bool,
+    workers: int,
 ) -> tuple[int, int, int, dict[str, Any]]:
     datasets = multiscale.get("datasets") or []
     if not datasets:
@@ -312,6 +365,7 @@ async def _copy_octree(
         dimension_separator=dimension_separator,
         verify=verify,
         progress=progress,
+        workers=workers,
         output_chunks=chunks,
     )
     array_count = 1
@@ -329,11 +383,9 @@ async def _copy_octree(
             compressor=compressor,
             dimension_separator=dimension_separator,
             verify=verify,
-            progress=(
-                (lambda _name, done, total, path=path: progress(path, done, total))
-                if progress is not None
-                else None
-            ),
+            progress=progress,
+            workers=workers,
+            path=path,
         )
         array_count += 1
         chunk_count += new_chunks
@@ -356,6 +408,7 @@ async def _copy_group(
     verify: bool,
     progress: ProgressCallback | None,
     spatial_chunk_size: int,
+    workers: int,
 ) -> tuple[int, int, int]:
     attributes = _v2_attributes(source.attrs)
     array_count = chunk_count = logical_bytes = 0
@@ -380,6 +433,7 @@ async def _copy_group(
             verify=verify,
             progress=progress,
             label_data=label_data,
+            workers=workers,
         )
         attributes["multiscales"] = [converted]
         array_count += arrays
@@ -410,6 +464,7 @@ async def _copy_group(
             dimension_separator=dimension_separator,
             verify=verify,
             progress=progress,
+            workers=workers,
             output_chunks=output_chunks,
         )
         array_count += 1
@@ -428,6 +483,7 @@ async def _copy_group(
             verify=verify,
             progress=progress,
             spatial_chunk_size=spatial_chunk_size,
+            workers=workers,
         )
         array_count += arrays
         chunk_count += chunks
@@ -446,6 +502,7 @@ async def async_convert_omehans_to_ome_zarr(
     verify: bool = False,
     progress: ProgressCallback | None = None,
     spatial_chunk_size: int = 128,
+    workers: int = 1,
 ) -> ConversionResult:
     """Asynchronously convert to a standard, directory-based OME-Zarr v2.
 
@@ -473,6 +530,9 @@ async def async_convert_omehans_to_ome_zarr(
     spatial_chunk_size:
         Output Z/Y/X chunk edge and the stopping size for the octree. The
         default is 128, producing 128x128x128 spatial chunks.
+    workers:
+        Maximum number of chunks processed concurrently within one pyramid
+        level. Pyramid levels themselves remain sequential. Default is 1.
     """
 
     source_path = Path(source).expanduser().resolve()
@@ -490,6 +550,8 @@ async def async_convert_omehans_to_ome_zarr(
         raise ValueError("dimension_separator must be '/' or '.'")
     if spatial_chunk_size < 1:
         raise ValueError("spatial_chunk_size must be positive")
+    if workers < 1:
+        raise ValueError("workers must be positive")
 
     from zarr.api.asynchronous import open_group
 
@@ -508,6 +570,7 @@ async def async_convert_omehans_to_ome_zarr(
         verify=verify,
         progress=progress,
         spatial_chunk_size=spatial_chunk_size,
+        workers=workers,
     )
     return ConversionResult(
         source=source_path,
@@ -528,6 +591,7 @@ def convert_omehans_to_ome_zarr(
     verify: bool = False,
     progress: ProgressCallback | None = None,
     spatial_chunk_size: int = 128,
+    workers: int = 1,
 ) -> ConversionResult:
     """Synchronous wrapper for :func:`async_convert_omehans_to_ome_zarr`.
 
@@ -545,6 +609,7 @@ def convert_omehans_to_ome_zarr(
             verify=verify,
             progress=progress,
             spatial_chunk_size=spatial_chunk_size,
+            workers=workers,
         )
     )
 
@@ -556,6 +621,9 @@ def _main() -> None:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--no-compression", action="store_true")
+    parser.add_argument(
+        "--workers", type=int, default=1, help="concurrent chunks per pyramid level"
+    )
     args = parser.parse_args()
 
     def show_progress(path: str, completed: int, total: int) -> None:
@@ -569,6 +637,7 @@ def _main() -> None:
         verify=args.verify,
         compressor=None if args.no_compression else "source",
         progress=show_progress,
+        workers=args.workers,
     )
     print(
         f"Converted {result.arrays} arrays, {result.chunks} chunks "
